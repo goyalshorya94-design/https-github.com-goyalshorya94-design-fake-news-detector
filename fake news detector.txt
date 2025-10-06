@@ -1,0 +1,131 @@
+fake_news_detector/
+├─ data/ (place your CSV datasets here)
+├─ train_model.py
+├─ model.joblib
+├─ app.py
+└─ static/
+   └─ index.html
+# train_model.py
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report
+import joblib
+
+# Replace with your dataset path. Expected CSV columns: "text", "label" (label: 0 = real, 1 = fake)
+DATA_PATH = "data/fake_or_real_news.csv"
+
+def load_data(path):
+    df = pd.read_csv(path)
+    # Basic cleaning - drop missing
+    df = df.dropna(subset=['text', 'label'])
+    return df['text'].values, df['label'].values
+
+def main():
+    X, y = load_data(DATA_PATH)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    pipeline = Pipeline([
+        ('tfidf', TfidfVectorizer(max_features=20000, ngram_range=(1,2))),
+        ('clf', LogisticRegression(max_iter=1000))
+    ])
+
+    print("Training model...")
+    pipeline.fit(X_train, y_train)
+
+    print("Evaluating...")
+    preds = pipeline.predict(X_test)
+    print(classification_report(y_test, preds))
+
+    joblib.dump(pipeline, 'model.joblib')
+    print("Saved model to model.joblib")
+
+if __name__ == "__main__":
+    main()
+python3 -m venv venv
+source venv/bin/activate    # or venv\Scripts\activate on Windows
+pip install pandas scikit-learn joblib
+# if you need tokenizer/spacy, install them too
+python train_model.py
+# app.py
+from flask import Flask, request, jsonify, send_from_directory
+import joblib
+import os
+
+MODEL_PATH = 'model.joblib'
+app = Flask(__name__, static_folder='static')
+
+# Load model on startup
+model = joblib.load(MODEL_PATH)
+
+@app.route('/')
+def index():
+    return send_from_directory('static', 'index.html')
+
+@app.route('/api/predict', methods=['POST'])
+def predict():
+    data = request.json
+    if not data or 'text' not in data:
+        return jsonify({'error': 'Provide JSON with "text" field'}), 400
+
+    text = data['text']
+    proba = model.predict_proba([text])[0]  # [prob_of_class0, prob_of_class1]
+    pred = int(model.predict([text])[0])
+    # Assume label 1 = fake, 0 = real (match your dataset)
+    response = {
+        'prediction': pred,
+        'prob_real': float(proba[0]),
+        'prob_fake': float(proba[1]),
+        'label_map': {'0': 'real', '1': 'fake'}
+    }
+    return jsonify(response)
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Fake News Detector</title>
+  <style>
+    body { font-family: Arial; max-width:800px; margin:40px auto; }
+    textarea { width:100%; height:150px }
+    button{ padding:10px 16px; margin-top:8px }
+    .result { margin-top:16px; padding:12px; border:1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <h1>Fake News Detector (demo)</h1>
+  <textarea id="text" placeholder="Paste the article or headline here..."></textarea>
+  <br/>
+  <button id="check">Check</button>
+
+  <div id="out" class="result" style="display:none"></div>
+
+<script>
+document.getElementById('check').onclick = async () => {
+  const text = document.getElementById('text').value;
+  if (!text.trim()) return alert('Paste some text first');
+
+  const res = await fetch('/api/predict', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({text})
+  });
+  const data = await res.json();
+  if (data.error) return alert(data.error);
+
+  const pFake = (data.prob_fake*100).toFixed(2);
+  const pReal = (data.prob_real*100).toFixed(2);
+  const label = data.prediction === 1 ? 'FAKE' : 'REAL';
+  document.getElementById('out').style.display = 'block';
+  document.getElementById('out').innerHTML = `
+    <strong>Prediction:</strong> ${label}<br/>
+    <strong>Confidence:</strong> Fake ${pFake}% — Real ${pReal}%
+  `;
+}
+</script>
+</body>
+</html>
